@@ -15,6 +15,8 @@ type Config struct {
 	grpcServerAddress                  string
 	serfBindAddress                    string
 	serfBindPort                       int
+	jaegerHost                         string
+	jaegerGRPCPort                     string
 }
 
 func (c *Config) NatsAddress() string {
@@ -49,6 +51,16 @@ func (c *Config) SerfBindPort() int {
 	return c.serfBindPort
 }
 
+func (c *Config) JaegerGRPCEndpoint() string {
+	if c.jaegerHost == "" || c.jaegerGRPCPort == "" {
+		log.Println("WARNING: Jaeger configuration missing from Config struct!")
+		return ""
+	}
+	endpoint := c.jaegerHost + ":" + c.jaegerGRPCPort
+	log.Printf("Tracing initialized with endpoint: %s", endpoint)
+	return endpoint
+}
+
 func NewFromEnv() (*Config, error) {
 	registrationReqTimeoutMilliseconds, err := strconv.Atoi(os.Getenv("REGISTRATION_REQ_TIMEOUT_MILLISECONDS"))
 	if err != nil {
@@ -65,6 +77,15 @@ func NewFromEnv() (*Config, error) {
 		log.Println(err)
 		serfBindPort = 7946
 	}
+	jaegerHost := os.Getenv("JAEGER_HOST")
+	if jaegerHost == "" {
+		jaegerHost = "10.5.0.200"
+	}
+
+	jaegerPort := os.Getenv("JAEGER_GRPC_PORT")
+	if jaegerPort == "" {
+		jaegerPort = "4317"
+	}
 	return &Config{
 		natsAddress:                        os.Getenv("NATS_ADDRESS"),
 		registrationReqTimeoutMilliseconds: int64(registrationReqTimeoutMilliseconds),
@@ -74,5 +95,7 @@ func NewFromEnv() (*Config, error) {
 		grpcServerAddress:                  os.Getenv("STAR_ADDRESS"),
 		serfBindAddress:                    os.Getenv("BIND_ADDRESS"),
 		serfBindPort:                       serfBindPort,
+		jaegerHost:                         jaegerHost,
+		jaegerGRPCPort:                     jaegerPort,
 	}, nil
 }

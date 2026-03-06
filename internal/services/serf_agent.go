@@ -3,6 +3,7 @@ package services
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,8 @@ import (
 	proto_mapper "github.com/c12s/star/internal/mappers/proto"
 	"github.com/hashicorp/serf/serf"
 	nats "github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -63,7 +66,11 @@ func NewSerfAgent(cf *configs.Config, nc *nats.Conn, nodeId string, configs doma
 	}, nil
 }
 
-func (s *SerfAgent) Join(joinAddress string) error {
+func (s *SerfAgent) Join(ctx context.Context, joinAddress string) error {
+	tracer := otel.Tracer("star")
+	_, span := tracer.Start(ctx, "Serf Join Network Call")
+	defer span.End()
+
 	_, err := s.agent.Join([]string{joinAddress + ":7946"}, false)
 	if err != nil {
 		return err
@@ -142,7 +149,13 @@ func (s *SerfAgent) Listen() {
 // }
 
 // TriggerUserEvent is used for no payload splitting
-func (s *SerfAgent) TriggerUserEvent(name, payload string, coalesce bool) error {
+func (s *SerfAgent) TriggerUserEvent(ctx context.Context, name, payload string, coalesce bool) error {
+	tracer := otel.Tracer("star.SerfAgent")
+	_, span := tracer.Start(ctx, "Serf.TriggerUserEvent")
+	defer span.End()
+
+	span.SetAttributes(attribute.String("event.name", name))
+
 	payloadBytes, err := preparePayload(payload)
 	if err != nil {
 		return err
@@ -206,8 +219,13 @@ func handleQuery(ev serf.Event) {
 
 // handleUser is used for no payload splitting
 func handleUser(ev serf.Event, s *SerfAgent) {
+	tracer := otel.Tracer("star")
+	ctx, span := tracer.Start(context.Background(), "Handle Serf User Event")
+	defer span.End()
+
 	log.Println("UserEvent handled:", ev.EventType())
 	if ue, ok := ev.(serf.UserEvent); ok {
+		span.SetAttributes(attribute.String("event.name", ue.Name))
 		log.Printf("Event name: %s  Event coalescing: %t", ue.Name, ue.Coalesce)
 		payload, err := parsePayload(ue.Payload)
 		if err != nil {
@@ -226,7 +244,11 @@ func handleUser(ev serf.Event, s *SerfAgent) {
 				log.Println(err)
 				return
 			}
+
+			_, dbSpan := tracer.Start(ctx, "DB.PutStandalone")
 			putErr := s.configs.PutStandalone(config)
+			dbSpan.End()
+
 			if putErr != nil {
 				log.Println(putErr)
 			}
@@ -243,7 +265,11 @@ func handleUser(ev serf.Event, s *SerfAgent) {
 				log.Println(err)
 				return
 			}
+
+			_, dbSpan := tracer.Start(ctx, "DB.PutGroup")
 			putErr := s.configs.PutGroup(config)
+			dbSpan.End()
+
 			if putErr != nil {
 				log.Println(putErr)
 			}
@@ -254,16 +280,16 @@ func handleUser(ev serf.Event, s *SerfAgent) {
 		// tag := ue.Name
 		// intended, err := s.checkTags(tag)
 		// if err != nil {
-		// 	log.Println(err)
+		//  log.Println(err)
 		// }
 		// if intended {
-		// 	payload, err = parsePayload(ue.Payload)
-		// 	if err != nil {
-		// 		log.Println(err)
-		// 	}
-		// 	log.Printf("Payload for this node:\n %s", payload)
+		//  payload, err = parsePayload(ue.Payload)
+		//  if err != nil {
+		//      log.Println(err)
+		//  }
+		//  log.Printf("Payload for this node:\n %s", payload)
 		// } else {
-		// 	log.Println("Payload not for this node")
+		//  log.Println("Payload not for this node")
 		// }
 	} else {
 		log.Println("Failed to cast to UserEvent")

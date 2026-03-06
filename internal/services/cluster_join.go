@@ -1,12 +1,15 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
 
 	"github.com/c12s/star/internal/domain"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 type ClusterJoinListener struct {
@@ -27,6 +30,11 @@ func NewClusterJoinListener(conn *nats.Conn, serf *SerfAgent, nodeId string, nod
 
 func (l *ClusterJoinListener) Listen() {
 	_, err := l.conn.Subscribe(fmt.Sprintf("%s.join", l.nodeId), func(msg *nats.Msg) {
+		ctx := otel.GetTextMapPropagator().Extract(context.Background(), propagation.HeaderCarrier(msg.Header))
+		tracer := otel.Tracer("star")
+		ctx, span := tracer.Start(ctx, "ClusterJoinHandler")
+		defer span.End()
+
 		params := strings.Split(string(msg.Data), "|")
 		if len(params) != 2 {
 			log.Println("invalid cluster join params: ", params)
@@ -36,7 +44,7 @@ func (l *ClusterJoinListener) Listen() {
 		clusterId := params[1]
 		// todo: what happens if the node is not a member of a cluster?
 		//l.serf.Leave()
-		err := l.serf.Join(address)
+		err := l.serf.Join(ctx, address)
 		if err != nil {
 			log.Println(err)
 			return

@@ -1,6 +1,7 @@
 package startup
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net"
@@ -59,7 +60,8 @@ func (a *app) init() {
 
 	registrationService := services.NewRegistrationService(registrationClient, nodeIdStore)
 	if !registrationService.Registered() {
-		err := registrationService.Register(a.config.MaxRegistrationRetries(), a.config.SerfBindAddress())
+		ctx := context.Background()
+		err := registrationService.Register(ctx, a.config.MaxRegistrationRetries(), a.config.SerfBindAddress())
 		if err != nil {
 			log.Fatalln(err)
 		}
@@ -150,6 +152,12 @@ func (a *app) startGrpcServer() error {
 }
 
 func (a *app) Start() error {
+	shutdownTracing := initTracing(
+		"star",
+		a.config.JaegerGRPCEndpoint(),
+	)
+	a.shutdownProcesses = append(a.shutdownProcesses, shutdownTracing)
+
 	a.init()
 
 	err := a.startConfigAsyncServer()

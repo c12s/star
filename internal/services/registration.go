@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 
 	magnetarapi "github.com/c12s/magnetar/pkg/api"
 	"github.com/c12s/star/internal/domain"
+	"go.opentelemetry.io/otel"
 )
 
 type RegistrationService struct {
@@ -22,15 +24,19 @@ func NewRegistrationService(client *magnetarapi.RegistrationAsyncClient, nodeIdR
 	}
 }
 
-func (rs *RegistrationService) Register(maxRetries int8, bindAddress string) error {
+func (rs *RegistrationService) Register(ctx context.Context, maxRetries int8, bindAddress string) error {
+	tracer := otel.Tracer("star")
+	ctx, span := tracer.Start(ctx, "RegistrationProcess")
+	defer span.End()
+
 	err := rs.nodeIdRepo.PutClusterId("")
 	if err != nil {
 		log.Fatal(err)
 	}
-	req := rs.buildReq(bindAddress)
+	req := rs.buildReq(ctx, bindAddress)
 	for attemptsLeft := maxRetries; attemptsLeft > 0; attemptsLeft-- {
 		errChan := make(chan error)
-		err := rs.tryRegister(req, errChan)
+		err := rs.tryRegister(ctx, req, errChan)
 		if err == nil {
 			err = <-errChan
 			if err == nil {
@@ -42,14 +48,21 @@ func (rs *RegistrationService) Register(maxRetries int8, bindAddress string) err
 	return errors.New("max registration attempts exceeded")
 }
 
-func (rs *RegistrationService) tryRegister(req *magnetarapi.RegistrationReq, errChan chan<- error) error {
-	err := rs.client.Register(req, func(resp *magnetarapi.RegistrationResp) {
+func (rs *RegistrationService) tryRegister(ctx context.Context, req *magnetarapi.RegistrationReq, errChan chan<- error) error {
+	tracer := otel.Tracer("star")
+	ctx, span := tracer.Start(ctx, "RegisterNode")
+	defer span.End()
+
+	err := rs.client.Register(ctx, req, func(resp *magnetarapi.RegistrationResp) {
 		errChan <- rs.nodeIdRepo.Put(domain.NodeId{Value: resp.NodeId})
 	})
 	return err
 }
 
-func (rs *RegistrationService) buildReq(bindAddress string) *magnetarapi.RegistrationReq {
+func (rs *RegistrationService) buildReq(ctx context.Context, bindAddress string) *magnetarapi.RegistrationReq {
+	_, span := otel.Tracer("star").Start(ctx, "CollectSystemMetrics")
+	defer span.End()
+
 	builder := magnetarapi.NewRegistrationReqBuilder()
 	cpuCores, err := cpuCores()
 	if err == nil {
