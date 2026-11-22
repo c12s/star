@@ -1,10 +1,14 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	magnetarapi "github.com/c12s/magnetar/pkg/api"
 	"github.com/c12s/star/internal/domain"
@@ -22,35 +26,42 @@ func NewRegistrationService(client *magnetarapi.RegistrationAsyncClient, nodeIdR
 	}
 }
 
-func (rs *RegistrationService) Register(maxRetries int8, bindAddress string) error {
+func (rs *RegistrationService) Register(maxRetries int8, timeout time.Duration, bindAddress string, capabilities []string, osStatus *magnetarapi.OsStatus) error {
 	err := rs.nodeIdRepo.PutClusterId("")
 	if err != nil {
 		log.Fatal(err)
 	}
-	req := rs.buildReq(bindAddress)
+	req := rs.buildReq(bindAddress, capabilities, osStatus)
+	// Re-assert the id we already have (re-registration after a control-plane
+	// reset, or after the control plane lost our record): Magnetar then
+	// updates that record instead of minting a duplicate UUID.
+	if id, err := rs.nodeIdRepo.Get(); err == nil && id.Value != "" {
+		req.NodeId = id.Value
+	}
 	for attemptsLeft := maxRetries; attemptsLeft > 0; attemptsLeft-- {
-		errChan := make(chan error)
-		err := rs.tryRegister(req, errChan)
+		err := rs.tryRegister(req, timeout)
 		if err == nil {
-			err = <-errChan
-			if err == nil {
-				return nil
-			}
+			return nil
 		}
 		log.Println(err)
 	}
 	return errors.New("max registration attempts exceeded")
 }
 
-func (rs *RegistrationService) tryRegister(req *magnetarapi.RegistrationReq, errChan chan<- error) error {
-	err := rs.client.Register(req, func(resp *magnetarapi.RegistrationResp) {
-		errChan <- rs.nodeIdRepo.Put(domain.NodeId{Value: resp.NodeId})
-	})
-	return err
+func (rs *RegistrationService) tryRegister(req *magnetarapi.RegistrationReq, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	resp, err := rs.client.Register(ctx, req)
+	if err != nil {
+		return err
+	}
+	return rs.nodeIdRepo.Put(domain.NodeId{Value: resp.NodeId})
 }
 
-func (rs *RegistrationService) buildReq(bindAddress string) *magnetarapi.RegistrationReq {
+func (rs *RegistrationService) buildReq(bindAddress string, capabilities []string, osStatus *magnetarapi.OsStatus) *magnetarapi.RegistrationReq {
 	builder := magnetarapi.NewRegistrationReqBuilder()
+	builder = builder.AddCapabilities(capabilities...)
+	builder = builder.SetOsStatus(osStatus)
 	cpuCores, err := cpuCores()
 	if err == nil {
 		builder = builder.AddFloat64Label("cpu-cores", cpuCores)
@@ -109,6 +120,11 @@ func (rs *RegistrationService) buildReq(bindAddress string) *magnetarapi.Registr
 	if err == nil {
 		builder = builder.AddFloat64Label("memory-totalGB", memoryTotalGB)
 	}
+	// NODE_LABELS (from the seed) lets a provisioner tag the node, e.g. a VM
+	// with its host, so it can be claimed precisely
+	for key, value := range parseNodeLabels(os.Getenv("NODE_LABELS")) {
+		builder = builder.AddStringLabel(key, value)
+	}
 	req := builder.Request()
 	req.Resources["mem"] = memoryTotalGB
 	req.Resources["cpu"] = cpuCores
@@ -122,4 +138,18 @@ func (rs *RegistrationService) Registered() bool {
 		return false
 	}
 	return true
+}
+
+// parseNodeLabels reads "k1=v1,k2=v2"; malformed entries are skipped.
+func parseNodeLabels(raw string) map[string]string {
+	labels := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if !ok || key == "" || value == "" {
+			continue
+		}
+		labels[key] = value
+	}
+	return labels
 }

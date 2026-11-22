@@ -2,6 +2,8 @@ package services
 
 import (
 	"errors"
+	"math"
+	"os"
 
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
@@ -69,20 +71,36 @@ func fsType() (string, error) {
 	return diskInfo.Fstype, nil
 }
 
+// dataDisk is the filesystem disk labels describe. On a bootc node "/" is the
+// read-only composefs image mount (reported as ~0 bytes); node data and VM
+// disks live on the writable disk behind /var. Plain hosts fall back to "/".
+func dataDisk() string {
+	if _, err := os.Stat("/var"); err == nil {
+		return "/var"
+	}
+	return "/"
+}
+
 func diskTotalGB() (float64, error) {
-	diskInfo, err := disk.Usage("/")
+	diskInfo, err := disk.Usage(dataDisk())
 	if err != nil {
 		return 0, err
 	}
-	return float64(diskInfo.Total / 1000000000), nil
+	return bytesToGB(diskInfo.Total), nil
 }
 
 func diskFreeGB() (float64, error) {
-	diskInfo, err := disk.Usage("/")
+	diskInfo, err := disk.Usage(dataDisk())
 	if err != nil {
 		return 0, err
 	}
-	return float64(diskInfo.Free / 1000000000), nil
+	return bytesToGB(diskInfo.Free), nil
+}
+
+// bytesToGB converts to decimal GB, rounded to two places (the label shows
+// two). Dividing before converting to float used to drop the fraction.
+func bytesToGB(b uint64) float64 {
+	return math.Round(float64(b)/1e7) / 100
 }
 
 func kernelArch() (string, error) {
@@ -113,5 +131,5 @@ func memoryTotalGB() (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return float64(memInfo.Total / 1000000000), nil
+	return bytesToGB(memInfo.Total), nil
 }
